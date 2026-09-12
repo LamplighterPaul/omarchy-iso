@@ -8,9 +8,11 @@ import os
 import re
 import time
 import traceback
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from . import leaderboard
 from .context import InstallContext
 from .ui import error, info
 
@@ -35,6 +37,9 @@ def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
     run_started_ns = time.monotonic_ns()
     state = {
         "schema": TIMING_SCHEMA,
+        # Minted before the first phase so a run that fails still has a name in
+        # its log, and a run that finishes is matched to its screen by it.
+        "run_id": str(uuid.uuid4()),
         "started_at": time.time(),
         # The dashboard counts packages under <target>/var/lib/pacman/local;
         # publish the path rather than have the UI assume /mnt.
@@ -99,9 +104,13 @@ def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
     state["expected_packages"] = _expected_package_count()
     _write_state(state_path, state)
 
-    timing_path = ctx.target / "var" / "log" / "omarchy-install-timing.json"
-    timing_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_state(timing_path, state)
+    try:
+        leaderboard.finalize(ctx, state)
+    except Exception as exc:  # noqa: BLE001 — the timing file never fails an install
+        info(f"› leaderboard: artifact not written ({exc}); keeping the plain timing file")
+        timing_path = ctx.target / leaderboard.TIMING_LOG
+        timing_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_state(timing_path, state)
 
 
 def phase_id(name: str, fn: PhaseFn) -> str:

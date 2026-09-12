@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -58,11 +59,12 @@ class PhaseLoopTimingTest(unittest.TestCase):
     def document(self):
         return json.loads((self.target / "var/log/omarchy-install-timing.json").read_text())
 
-    def test_records_schema_ids_and_monotonic_ns(self):
+    def test_records_schema_run_id_ids_and_monotonic_ns(self):
         self.run_phases()
         doc = self.document()
 
         self.assertEqual(doc["schema"], 1)
+        self.assertEqual(str(uuid.UUID(doc["run_id"])), doc["run_id"])
         self.assertEqual([p["id"] for p in doc["phases"]], ["slow_phase", "quick_phase"])
         for phase in doc["phases"]:
             self.assertIsInstance(phase["elapsed_ns"], int)
@@ -89,6 +91,7 @@ class PhaseLoopTimingTest(unittest.TestCase):
 
         # The live state the dashboard polls carries the same shape.
         live = json.loads((self.state_dir / "state.json").read_text())
+        self.assertEqual(live["run_id"], doc["run_id"])
         self.assertEqual(live["total_elapsed_ns"], doc["total_elapsed_ns"])
 
     def test_failed_phase_is_recorded_with_its_id(self):
