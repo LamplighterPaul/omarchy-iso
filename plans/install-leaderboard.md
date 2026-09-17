@@ -1,97 +1,96 @@
-# Install Leaderboard Plan: Timing Tower (pending agreed name)
+# Install leaderboard plan
+
+## Status: pending #177
+
+As of 17 September 2026, neither installer PR has merged.
+
+- [#177](https://github.com/omacom/omarchy-iso/pull/177) adds monotonic timing and the proposed duration display. It is implemented, tested and awaiting review. The PR includes screenshots.
+- [#178](https://github.com/omacom/omarchy-iso/pull/178) is the draft follow-up for run IDs, class and hardware information, and signing. It needs to incorporate the latest #177 before review.
+- The installed-system commands, submission flow, first-network offer and leaderboard service remain planned.
+
+The next step is to settle and merge #177, then update and review #178. The display examples below describe the current proposal, not an approved format.
 
 ## Goal
 
-Give the install time an official home. The ISO already races: the dashboard ends on "Installed Omarchy in 0m 43s", people photograph that screen, and records circulate as posts. This plan turns that number into a result that can be classed, compared across releases, and submitted — only when the person who ran the install chooses to.
+Give Omarchy install times a leaderboard with comparable classes and results for each release. Keep the result locally during installation, then let the user check its position and choose whether to share it with hardware information.
 
-Product brief (DHH, 27 August 2026): full integration; different classes; store the log on install; after first network, check whether the run is a top 10 in its class and offer to submit; attach fastfetch hardware data; only ever check servers and submit on user approval; consider signing results with a key created at install.
+The direction discussed with DHH on 27 August was full integration: store the install log, compare against the top ten in its class after network access becomes available, offer submission for a qualifying result, and include fastfetch data. Both checking the server and submitting results require user approval. Signing during installation was suggested as a possibility.
 
-Three surfaces, three repositories. This plan owns the installer half and states the contract the other two depend on.
+The implementation proposed on 29 August split this into small changes across the installer, installed Omarchy and a separate leaderboard service. That remains the approach. The detailed artifact, commands and service design below are proposals supporting that direction.
 
-- `omarchy-iso` (this repo): produce a versioned, classed, signed timing artifact on the target. Show the lap time.
-- `basecamp/omarchy`: `omarchy leaderboard status|preview|check|submit`, one quiet post-install offer, menu entry.
-- A small Rails app (home pending, see below; `omarchy-plugin-registry` is the closest sibling): per-release class boards, sector bests, machine pages, review queue.
+## Installer
 
-## Current State (August 2026)
+Upstream already saves `/var/log/omarchy-install-timing.json` with wall-clock timestamps and per-phase durations. #177 improves that record; #178 adds the information needed for a leaderboard submission. Neither PR contacts a server.
 
-- `orchestrator/phases.py` `run()` records 14 phases with `time.time()` and writes `/run/omarchy-install/state.json` after each one; `omarchy-install-dashboard` polls it every 0.5s. On success the same dict is copied atomically to the target as `/var/log/omarchy-install-timing.json`.
-- The document holds `started_at`, `finished_at`, `target`, `phases[] {name, status, elapsed}` (float seconds), `installed_packages`, `expected_packages`. No schema version, no run ID, no ISO identity, no hardware, no class, no signature. Root can rewrite it.
-- The finish screen (`render_finish`) prints whole seconds: `(finished_at - started_at) | round`, formatted `Xm Ys`. Then a single `Reboot Now` button. Deferred-provisioning installs skip the screen.
-- Install mode is already a fact (`InstallContext.mode`: `full_disk` or `protected`). Encryption for class purposes is `_provision_install_encrypted` in `phases_impl.py`, not the configurator flag. The install is always offline (`make_mirror_handler(offline=True)`, bind-mounted `/var/cache/omarchy/mirror/offline`).
-- ISO identity on the medium is `/root/omarchy_iso_ref` and `/root/omarchy_mirror` from `builder/build-iso.sh` (production ISOs: `quattro` + `stable`). Every published ISO has a `.sha256` sidecar.
-- `.automated_script.sh` `warm_offline_mirror` pre-reads the offline mirror into the page cache during the configurator, budgeted at `MemAvailable/2`, disabled by `OMARCHY_NO_PREFETCH=1`. The advantage is real and uneven across RAM sizes.
-- OpenSSL is on the live ISO (the configurator uses `openssl passwd -6`).
-- In `basecamp/omarchy`, nothing contacts a server without a user action: first-run `wifi.sh` only asks NetworkManager locally; `omarchy-debug` uploads to logs.omarchy.org after a `gum choose`; `omarchy-upload-log` already collects `fastfetch --pipe`. Those are the idioms to reuse.
+### Timing and display — #177
 
-## Architecture
+Record the whole run and each phase with a monotonic clock. `total_elapsed_ns` measures from before the first phase to after the last, including the orchestrator's overhead. It is not the sum of the phases. Keep the existing wall-clock fields for compatibility, and add a schema version and stable phase IDs.
 
-```text
-live ISO                                    target disk                          installed Omarchy
---------                                    -----------                          -----------------
-orchestrator.run()                          /var/log/omarchy-install-timing.json omarchy leaderboard status
-  phases -> state.json (unchanged)   --->     schema 1, ns, run_id, class,       omarchy leaderboard preview
-  keypair via openssl, key on stdin           hardware                           omarchy leaderboard check   (GET public top10)
-  sign the file on disk, key discarded      /var/lib/omarchy/leaderboard/        omarchy leaderboard submit  (preview, confirm, POST)
-                                              timing.json, timing.sig,           offer service: one toast, once
-                                              install.pub; @factory copy of all three
-```
+The current finish-screen proposal uses explicit units:
 
-The timing file is the only contract between repositories. Its schema is versioned so the CLI can refuse to interpret a v0 file as anything more than seconds.
+- Below one minute: `Installed Omarchy in 0 min 37.474 s`.
+- From one minute: `Installed Omarchy in 1 min 37 s`.
+- From one hour: `Installed Omarchy in 1 h 2 min 3 s`.
 
-## Timing artifact (schema 1)
+The display truncates to milliseconds below one minute and whole seconds otherwise. The file keeps nanosecond precision at every duration. Legacy state files remain readable, using whole seconds. `Reboot Now` remains the only finish-screen action.
 
-Additive on the live `state.json` — the dashboard keeps its float `started_at`, `finished_at`, `elapsed` and display names. The target document adds:
+### Classed, signed result — #178
 
-- `schema: 1`, `run_id` (UUIDv4 minted before phase 1), and `iso: {ref, mirror, offline_db_sha256, build}` (the hash is of the medium's offline database; the server allow-lists published values) plus `release` (the omarchy package version on the target) and `live` (kernel and uptime of the live session).
-- `phases[]` gain `id` (a stable identifier such as `arch_install_system`, from the callable name) and `elapsed_ns` from `time.monotonic_ns()`. `total_elapsed_ns` is the run itself on the same monotonic clock, from before the first phase to after the last: the span the finish screen has always shown, to more digits. The phases are its sectors and add up to slightly less; the difference is the orchestrator's own overhead between them, kept visible for that reason. The competitive total is the run, not the wall clock and not the sum.
-- `class`: `{mode, encrypted, virt, warm}` — mode from `InstallContext.mode`, encryption from `_provision_install_encrypted`, `virt` from `systemd-detect-virt`, `warm` from `OMARCHY_NO_PREFETCH`. The install is always offline, so there is no seed axis.
-- `hardware`: DMI vendor, product, product version and board, `/proc/cpuinfo` model name and CPU count, `MemTotal`, and the disk behind the target and behind the install medium (model, transport, rotational, size; walking dm-crypt and partitions with `lsblk -s`). Never hostname, serials, MAC addresses, disk UUIDs, or usernames.
-- `seal: {algorithm, public_key}` and `attestation: null`, a slot reserved for a hardware-backed witness once measured boot of the live medium is something a server can check.
-- Every probe is best-effort: a failed one leaves `null` in its slot and the document is still written and sealed. Nothing in it fails an install.
+Create a run ID before the first phase, then add:
 
-Class is what the installer observed, never a label the user picks. "Official" is decided server-side from the tuple plus the ISO allow-list; the client never asserts it.
+- ISO identity: ref, mirror, offline database hash and available build information, plus the installed Omarchy release.
+- Install class: full-disk or protected install, encryption, virtualisation and prefetch information.
+- Hardware: vendor and model, CPU, memory, target disk and install medium. Exclude usernames, hostnames, serial numbers, MAC addresses and disk UUIDs.
 
-## Signing
+The current draft calls the prefetch field `warm`, but it records whether prefetch was enabled, not how much data was actually cached. The field name and its use in ranking need agreement before the artifact contract is final.
 
-The keypair is generated in the live environment after the phase loop succeeds (Ed25519, `openssl genpkey`). The document is written to `/var/lib/omarchy/leaderboard/timing.json` and to the timing log, same bytes in both, and the signature is made over the file on disk (`openssl pkeyutl -sign -rawin`, the private key fed on stdin) so the bytes sealed are the bytes a reader finds. `timing.sig` and `install.pub` land beside the document. The private key is never written anywhere and is gone at reboot. If openssl or the signature fails, the document is written without a seal and the install log says so.
+Write the completed timing document to `/var/lib/omarchy/leaderboard/timing.json` and the existing timing log, with identical bytes. Generate an Ed25519 keypair in the live environment and sign the file on disk using OpenSSL. Save `timing.sig` and `install.pub` alongside it; never write the private key to the target. Copy the result into the btrfs `@factory` snapshot so a factory reset preserves it. Probes and signing are best-effort and must not fail an otherwise successful install.
 
-That makes the result sealed at the finish line: editing the file after install breaks the signature and no key exists to re-sign it. It does not make the result true. Someone can fabricate a document and a keypair on any machine. Copy and docs say tamper-evident, never verified or cheat-proof. Anti-cheat is class isolation, plausibility checks, and review on the server (below). TPM or Secure Boot attestation is a later tier and depends on `plans/consumer-secure-boot.md`.
+The signature detects changes relative to the supplied public key. It does not prove that an official installer produced the result: someone can create a false document and a new keypair. Server-side checks and review are still needed. Hardware-backed attestation is outside the initial scope.
 
-All three files are also copied into the `@factory` snapshot (remount rw, copy, restore ro), so a factory reset keeps the original result. This happens after the last phase, not as a phase of its own, and is a no-op on a target that is not btrfs.
+#178 also adds a short run code, the first eight characters of the run ID, beside the duration. A screenshot can then be matched to a submitted result. The code is not part of #177, and #178 still needs the updated duration format.
 
-## Finish screen
+The artifact is the contract with the installed-system command and the service. Schema 1 timing from #177 alone is not the full result: readers must also check for the fields and signature files added by #178.
 
-`Installed Omarchy in 1:40.557  #bf95d41d`: minutes, seconds and thousandths from `total_elapsed_ns`, and the first eight characters of `run_id` dimmed beside it. Thousandths show only under a minute, where the race is; from a minute up the screen shows `m:ss`, and the file keeps every nanosecond either way. `Reboot Now` stays the only action. The run code lets a photo or video of this screen be matched to a submission later, which is the cheapest witness there is. A hint line pointing at `omarchy leaderboard` comes with the command itself, not before.
+## Installed Omarchy
 
-## Installed system (basecamp/omarchy)
+Add `omarchy leaderboard` in `omacom/omarchy`:
 
-- `omarchy leaderboard status` and `preview` are offline: print the artifact, its class in words, six sector times aggregated from the 14 phases (Setup, Packages, System, Boot, User, Validate), and the 14 phases. `preview --json` prints exactly the document `submit` would send.
-- `submit`: collect a sanitised fastfetch snapshot (`/etc/fastfetch/leaderboard.jsonc`: host, CPU, GPU, disk, memory, kernel; no hostname, IP, or user), print the payload, `gum confirm --default=false`, POST. Because the install key is gone, the payload wraps the sealed artifact plus unsigned metadata; the server verifies the inner signature and cross-checks the install-time hardware against fastfetch.
-- `check`: GET the public per-release `top10.json`, compare locally, print the position.
-- Offer: a user unit after `graphical-session.target` waits for `nm-online`, then shows one low-urgency notification, once, latched with `omarchy-done`. Default `OMARCHY_LEADERBOARD_CHECK=prompt`: the notification asks whether to check, and the GET happens on click. `OMARCHY_LEADERBOARD_CHECK=auto`: the public GET runs first and the notification appears only for a top-10 run. Either way nothing about the machine is sent before the submit confirmation. Never auto-submit, never a second notification, never a critical toast beside the existing Wi-Fi and update ones.
-- Files split per `docs/file-layout.md`: binaries in `omarchy`; the unit, sudoers drop-in for the sign helper, fastfetch config, and `/etc/omarchy/leaderboard.conf` in `omarchy-settings`. Existing installs get a migration that enables the unit without starting it.
+- `status`: inspect the saved result and signature locally.
+- `preview`: show the result, class, phase timings and sanitised fastfetch information that would be submitted. `preview --json` produces the submission payload.
+- `check`: with the user's approval, fetch the public top-ten results for the release and compare locally.
+- `submit`: show the payload, ask for confirmation with the default set to No, and send it to the service.
+
+Submission forwards the existing signed bytes and signature, with additional hardware metadata outside the signed document. It does not need a new signing key or a post-install sign helper. Whether a submission carries a handle, and how that handle is established, remains open.
+
+After the first network connection, offer one quiet notification asking whether to check the result. Contact the service only after approval. If the result qualifies, offer submission; preview and confirmation still precede the upload. Do not repeat the offer or show it when there is no eligible artifact. There is no automatic submission or unapproved background check in this proposal.
+
+Add a menu entry when the command exists. Follow `docs/file-layout.md`: binaries in `omarchy`; the user unit, fastfetch configuration and settings in `omarchy-settings`. Introduce the unit through a migration without starting it during the upgrade.
 
 ## Leaderboard service
 
-Rails 8, Hotwire, SQLite, Kamal — the shape of `omarchy-plugin-registry`. Public `GET /r/:release/top10.json` (cacheable, no parameters) and `POST /api/v1/results` (verify signature over the raw inner bytes, reject duplicate `run_id`, 3 submissions per public key per day). Boards per release and class; sector bests; pages per CPU and machine; run pages with the phase waterfall.
+The proposed implementation is Rails, Hotwire, SQLite and Kamal, following the plugin registry's deployment approach. The repository, name and hosting are still to be agreed.
 
-Integrity is three tiers: Standard (automated checks passed), Reviewed (a maintainer looked), Witnessed (finish-screen footage with the run code). Every result enters as provisional and unlisted until it passes structure, class, hardware cross-check, and a plausibility floor (phase 3 reads about 3 GB from the medium; a total that implies impossible throughput is held). Rank 1 in the official class is always held for a human before it shows as the record.
+Start with per-release class boards, a public top-ten endpoint and a result-submission endpoint. The service checks the artifact structure, signature, run ID, release and class information. Maintain an allow-list of published ISO identities and reject duplicate run IDs. Check install-time hardware against the submitted fastfetch data and flag implausible timings. These checks do not establish trusted provenance.
 
-## Phases
+The original proposal also included sector bests, Geekbench-style machine pages and human review before a result becomes the top record in its class. The initial views and review process need agreement with whoever operates the service. Fixed throughput thresholds, review tiers and submission limits should be defined there, rather than treated as settled installer requirements. A public key generated for each install is not a stable identity for rate limiting.
 
-1. Lap time and run code (#177): `elapsed_ns`, `total_elapsed_ns`, phase `id`, `run_id`, `schema`, and the finish screen in lap-time format. Unit tests assert the run covers at least the sum of its sectors, the display on both sides of the minute, and that existing fields are untouched. Useful on its own and independent of how the packages get onto the disk.
-2. Classed, sealed artifact (#178, stacked on #177): ISO identity, release, class tuple, hardware snapshot, Ed25519 seal, factory copy. Unit tests assert the signature verifies with openssl, a one-byte edit breaks it, and no private key exists on the target. The class and hardware fields describe how the install was done, so the root-image installers (#113, #145) may need a small follow-up here.
-3. `basecamp/omarchy`: status and preview; then submit with sign helper and fastfetch config; then menu entry; then the offer unit and migration.
-4. Service: skeleton and schema; API; boards; review queue and ISO allow-list ingest from `omarchy-iso-release`.
-5. First stable ISO that writes schema 1 becomes the first scored release. Earlier runs stay posts.
+## Delivery order
 
-Each phase is one PR and is useful without the ones after it. Phases 1 and 2 are the ISO side and the Quattro RS scope; they improve the timing data and the finish screen even if the board never ships.
+1. Review and merge #177: timing and duration display.
+2. Bring #178 up to date, settle the artifact fields, and review the run ID, class, hardware and signing changes. Check compatibility with whichever installer changes land from #113, #145 or the bash/systemd work in #132.
+3. Add offline `status` and `preview`, using the saved artifact. These can be developed before the service is available.
+4. Build the service and complete a manual `check`/`submit` flow against it, with explicit approval and payload preview.
+5. Add the menu entry and first-network offer once the complete flow works.
 
-## Pending decisions
+The first scored release needs the agreed full artifact and an ISO identity accepted by the service; schema 1 timing alone is insufficient. Earlier installs can still be shared as screenshots.
 
-Decided: no handle identity in v1. A result is a machine and a time, not a person; names can come later behind a sign-in if wanted.
+The proposed Quattro RS scope is the installer work in #177 and #178. Full integration remains the goal, delivered through subsequent PRs.
 
-1. Name and hostname. Timing Tower and `tower.omarchy.org` are placeholders; open to anything.
-2. Where the service lives and who builds it. Offered: built in the contributor's account and transferred into `omacom` when wanted, or started in-org from day one. Either way the ISO and CLI phases do not depend on it.
-3. Default for `OMARCHY_LEADERBOARD_CHECK`: `prompt` (no unprompted network call on first boot, matching the rest of Omarchy) or `auto` (the brief's literal reading; the notification only appears for top-10 runs).
-4. Whether page-cache warm should become a class axis once the data shows how much it moves results, and whether a RAM bucket is needed.
+## Decisions still open
+
+1. Name and hostname. Timing Tower and `tower.omarchy.org` were placeholders.
+2. Service repository, hosting and ownership. The original offer was to build it in the contributor's account and transfer it to `omacom` if wanted.
+3. Handles: free text, sign-in, or no handles for the first release. This was left open in the original proposal.
+4. Final class definitions, including prefetch and whether RAM needs a separate ranking category.
+5. Service submission limits, acceptance checks, review process and initial board views.
