@@ -1,5 +1,5 @@
 """Unit tests for the schema-1 fields the phase loop records in the install
-timing document: a run id, a stable id per phase, monotonic nanoseconds per
+timing document: a stable id per phase, monotonic nanoseconds per
 phase and for the run as a whole. Runs the real phase loop over fake phases
 against a temp target.
 """

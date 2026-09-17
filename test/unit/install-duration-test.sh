@@ -1,9 +1,7 @@
 #!/bin/bash
 #
-# Unit tests for the finish screen's lap time. The dashboard reads the run
-# time the orchestrator publishes in nanoseconds, shows it as m:ss.mmm on
-# both sides of the minute, and falls back to the old wall-clock m/s form for
-# state files that predate it.
+# Unit tests for the finish screen's duration. Explicit units at every scale,
+# thousandths only below a minute, and whole seconds for old wall-clock states.
 
 set -euo pipefail
 
@@ -46,39 +44,50 @@ expect() {
   pass "$description"
 }
 
-expect "under a minute keeps the minute digit" \
+expect "under a minute shows explicit units and thousandths" \
   '{"total_elapsed_ns": 45889123456}' \
-  "0:45.889"
+  "0 min 45.889 s"
 
 expect "the last thousandth under a minute still shows" \
   '{"total_elapsed_ns": 59999999999}' \
-  "0:59.999"
+  "0 min 59.999 s"
 
-expect "a minute exactly keeps the thousandths" \
+expect "a minute exactly drops the thousandths" \
   '{"total_elapsed_ns": 60000000000}' \
-  "1:00.000"
+  "1 min 0 s"
 
-expect "over a minute is the same shape" \
+expect "over a minute truncates to whole seconds" \
   '{"total_elapsed_ns": 100557000000}' \
-  "1:40.557"
+  "1 min 40 s"
 
-expect "a slow install pads its seconds" \
+expect "a slow install shows whole seconds" \
   '{"total_elapsed_ns": 414700000000}' \
-  "6:54.700"
+  "6 min 54 s"
 
 expect "under an hour has no hour digit" \
   '{"total_elapsed_ns": 3599999000000}' \
-  "59:59.999"
+  "59 min 59 s"
 
-expect "an hour exactly switches to endurance form" \
+expect "an hour exactly adds the hour unit" \
   '{"total_elapsed_ns": 3600000000000}' \
-  "1:00:00.000"
+  "1 h 0 min 0 s"
 
-expect "over an hour is h:mm:ss.mmm" \
+expect "over an hour uses explicit units and whole seconds" \
   '{"total_elapsed_ns": 10823555000000}' \
-  "3:00:23.555"
+  "3 h 0 min 23 s"
 
-expect "a state file without the phase sum keeps the m/s form" \
+expect "a legacy state uses explicit units without invented precision" \
   '{"started_at": 1000.0, "finished_at": 1100.6}' \
-  "1m 41s"
+  "1 min 41 s"
 
+expect "subsecond installs pad the thousandths" \
+  '{"total_elapsed_ns": 5000000}' \
+  "0 min 0.005 s"
+
+expect "just over a minute does not show thousandths" \
+  '{"total_elapsed_ns": 60001000000}' \
+  "1 min 0 s"
+
+expect "legacy hour duration uses explicit units" \
+  '{"started_at": 1000.0, "finished_at": 4723.0}' \
+  "1 h 2 min 3 s"
